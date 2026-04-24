@@ -26,6 +26,9 @@ pub enum Annotation {
     UnscopedCall(Ident),
     UnscopedVar(Ident),
     ScopedCall(Vec<Ident>, Ident),
+    /// Dreamchecker-provided: receiver type path parts and proc name for a follow call.
+    /// Enables go-to-definition when the receiver is a proc call result (not a plain ident chain).
+    ScopedCallType(Vec<Ident>, Ident),
     ScopedVar(Vec<Ident>, Ident),
     ParentCall,        // ..
     ReturnVal,         // .

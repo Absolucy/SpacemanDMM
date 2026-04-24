@@ -283,6 +283,8 @@ struct Engine {
     references_table: background::Background<find_references::ReferencesTable>,
 
     annotations: HashMap<Url, (FileId, FileId, Rc<AnnotationTree>)>,
+    /// Dreamchecker-inferred follow-call annotations for go-to-definition.
+    dc_annotations: Arc<Mutex<Vec<dreamchecker::DcAnnotationEntry>>>,
     diagnostics_tracker: Arc<Mutex<DiagnosticsTracker>>,
 
     client_caps: ClientCaps,
@@ -306,6 +308,7 @@ impl Engine {
             references_table: Default::default(),
 
             annotations: Default::default(),
+            dc_annotations: Arc::new(Mutex::new(Vec::new())),
             diagnostics_tracker: Arc::new(Mutex::new(Default::default())),
 
             client_caps: Default::default(),
@@ -617,8 +620,10 @@ impl Engine {
             let root = self.root.clone();
             let related_info = self.client_caps.related_info;
             let diagnostics_tracker = self.diagnostics_tracker.clone();
+            let dc_annotations = self.dc_annotations.clone();
             std::thread::spawn(move || {
-                dreamchecker::run(&context, &objtree);
+                let dc_ann = dreamchecker::run_with_annotations(&context, &objtree);
+                *dc_annotations.lock().unwrap() = dc_ann;
                 let elapsed = start.elapsed();
                 start += elapsed;
                 eprint!(
@@ -762,7 +767,8 @@ impl Engine {
                         self.objtree = Arc::new(parser.parse_object_tree());
                     }
                     pp.finalize();
-                    dreamchecker::run(&self.context, &self.objtree);
+                    let dc_ann = dreamchecker::run_with_annotations(&self.context, &self.objtree);
+                    *self.dc_annotations.lock().unwrap() = dc_ann;
 
                     // Perform a diagnostics pump on this file only.
                     // Assume all errors are in this file.
@@ -1546,13 +1552,13 @@ impl Engine {
 
     fn HoverRequest(&mut self, params: P<HoverRequest>) -> R<HoverRequest> {
         let tdp = params.text_document_position_params;
-        let (_, file_id, annotations) = self.get_annotations(&tdp.text_document.uri)?;
+        let (real_file_id, file_id, annotations) = self.get_annotations(&tdp.text_document.uri)?;
         let location = dm::Location {
             file: file_id,
             line: tdp.position.line + 1,
             column: tdp.position.character as u16 + 1,
         };
-        let symbol_id = self.symbol_id_at(tdp)?;
+        let symbol_id = self.symbol_id_at(tdp.clone())?;
         let mut results = Vec::new();
 
         let iter = annotations.get_location(location);
@@ -1707,6 +1713,31 @@ impl Engine {
                 _ => {},
             }
         }
+
+        // Fall back to dreamchecker annotations for typed follow calls (e.g. astype(x, /T)?.method())
+        if results.is_empty() {
+            let cursor_line = tdp.position.line + 1;
+            let cursor_col = tdp.position.character as u16 + 1;
+            let found = {
+                let dc = self.dc_annotations.lock().unwrap();
+                dc.iter().find_map(|(start, end, type_parts, proc_name)| {
+                    if start.file == real_file_id
+                        && start.line == cursor_line
+                        && start.column <= cursor_col
+                        && end.column >= cursor_col
+                    {
+                        Some((type_parts.clone(), proc_name.clone()))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some((type_parts, proc_name)) = found {
+                let next = self.objtree.type_by_path(type_parts.iter().map(|s| s.as_str()));
+                results.append(&mut self.construct_proc_hover(proc_name.as_str(), next, true)?);
+            }
+        }
+
         if results.is_empty() {
             Ok(None)
         } else {
@@ -1840,6 +1871,36 @@ impl Engine {
             Annotation::MacroUse { name, definition_location, .. } => {
                 results.push(self.convert_location(*definition_location, &Default::default(), &["/DM/preprocessor/", name])?);
             },
+        }
+
+        // Fall back to dreamchecker annotations for typed follow calls (e.g. astype(x, /T)?.method())
+        if results.is_empty() {
+            let cursor_line = tdp.position.line + 1;
+            let cursor_col = tdp.position.character as u16 + 1;
+            let found = {
+                let dc = self.dc_annotations.lock().unwrap();
+                dc.iter().find_map(|(start, end, type_parts, proc_name)| {
+                    if start.file == real_file_id
+                        && start.line == cursor_line
+                        && start.column <= cursor_col
+                        && end.column >= cursor_col
+                    {
+                        Some((type_parts.clone(), proc_name.clone()))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some((type_parts, proc_name)) = found {
+                let mut next = self.objtree.type_by_path(type_parts.iter().map(|s| s.as_str()));
+                while let Some(ty) = next {
+                    if let Some(proc) = ty.procs.get(proc_name.as_str()) {
+                        results.push(self.convert_location(proc.main_value().location, &proc.main_value().docs, &[&ty.path, "/proc/", proc_name.as_str()])?);
+                        break;
+                    }
+                    next = ty.parent_type_without_root();
+                }
+            }
         }
 
         if results.is_empty() {
