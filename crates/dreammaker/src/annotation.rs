@@ -71,8 +71,15 @@ impl Default for AnnotationTree {
 
 impl AnnotationTree {
     pub fn insert(&mut self, place: std::ops::Range<Location>, value: Annotation) {
-        self.tree
-            .insert(range(place.start, place.end.pred()), value);
+        // When macro arg tokens carry real source locations but the following token
+        // is a substitution-body token at the call-site location (earlier in the
+        // file), the range can be backward. Clamp to a point annotation at start.
+        let interval_end = if place.end > place.start {
+            place.end.pred()
+        } else {
+            place.start
+        };
+        self.tree.insert(range(place.start, interval_end), value);
         self.len += 1;
     }
 

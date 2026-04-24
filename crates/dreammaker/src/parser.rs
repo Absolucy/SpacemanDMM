@@ -2549,7 +2549,9 @@ impl<'ctx, 'an, 'inp> Parser<'ctx, 'an, 'inp> {
                     },
                     None => {
                         belongs_to.push(i.clone());
-                        self.annotate(start, || Annotation::UnscopedVar(i.clone()));
+                        let end = self.updated_location();
+                        let end = if end > start { end } else { start.add_columns(i.len() as u16) };
+                        self.annotate_precise(start..end, || Annotation::UnscopedVar(i.clone()));
                         Term::Ident(i)
                     },
                 }
@@ -2697,6 +2699,9 @@ impl<'ctx, 'an, 'inp> Parser<'ctx, 'an, 'inp> {
             },
         };
         let end = self.updated_location();
+        // When the next token is a macro body token at the call-site location
+        // (earlier in the file than the ident), use the ident length as fallback width.
+        let end = if end > start { end } else { start.add_columns(ident.len() as u16) };
 
         let follow = match self.arguments(belongs_to, &ident)? {
             Some(args) => {

@@ -9,16 +9,11 @@ use dm::objtree::{ObjectTree, ProcRef, TypeRef};
 use dm::{Context, DMError, Location, Severity};
 
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 
 /// A single dreamchecker-inferred annotation entry: (ident_start, ident_end, receiver_type_parts, proc_name).
 /// Stored as a plain vec of tuples so it is `Send`-safe (unlike `AnnotationTree` which contains `Rc`).
 pub type DcAnnotationEntry = (Location, Location, Vec<Ident>, Ident);
-
-thread_local! {
-    static DC_ANNOTATIONS: RefCell<Option<Vec<DcAnnotationEntry>>> = const { RefCell::new(None) };
-}
 
 mod type_expr;
 use type_expr::TypeExpr;
@@ -342,26 +337,22 @@ impl<'o> From<StaticType<'o>> for Analysis<'o> {
 
 /// Run DreamChecker, registering diagnostics to the context.
 pub fn run(context: &Context, objtree: &ObjectTree) {
-    run_inner(context, objtree, false)
+    run_inner(context, objtree, false);
 }
 
 /// Run DreamChecker, registering diagnostics and printing progress to stdout.
 pub fn run_cli(context: &Context, objtree: &ObjectTree) {
-    run_inner(context, objtree, true)
+    run_inner(context, objtree, true);
 }
 
 /// Run DreamChecker and return [`DcAnnotationEntry`] entries for proc follow-calls whose
 /// receiver type was statically inferred. Used by dm-langserver for go-to-definition on
 /// expressions like `astype(x, /datum/foo)?.method()`.
 pub fn run_with_annotations(context: &Context, objtree: &ObjectTree) -> Vec<DcAnnotationEntry> {
-    DC_ANNOTATIONS.with(|cell| {
-        *cell.borrow_mut() = Some(Vec::new());
-    });
-    run_inner(context, objtree, false);
-    DC_ANNOTATIONS.with(|cell| cell.borrow_mut().take().unwrap_or_default())
+    run_inner(context, objtree, false)
 }
 
-fn run_inner(context: &Context, objtree: &ObjectTree, cli: bool) {
+fn run_inner(context: &Context, objtree: &ObjectTree, cli: bool) -> Vec<DcAnnotationEntry> {
     macro_rules! cli_println {
         ($($rest:tt)*) => {
             if cli { println!($($rest)*) }
@@ -409,6 +400,8 @@ fn run_inner(context: &Context, objtree: &ObjectTree, cli: bool) {
     cli_println!("============================================================");
     cli_println!("Analyzing proc call tree...\n");
     analyzer.check_proc_call_tree();
+
+    analyzer.dc_entries
 }
 
 // ----------------------------------------------------------------------------
@@ -639,6 +632,8 @@ pub struct AnalyzeObjectTree<'o> {
 
     sleeping_overrides: ViolatingOverrides<'o>,
     impure_overrides: ViolatingOverrides<'o>,
+
+    dc_entries: Vec<DcAnnotationEntry>,
 }
 
 impl<'o> AnalyzeObjectTree<'o> {
@@ -683,6 +678,7 @@ impl<'o> AnalyzeObjectTree<'o> {
             waitfor_procs: Default::default(),
             sleeping_overrides: Default::default(),
             impure_overrides: Default::default(),
+            dc_entries: Default::default(),
         }
     }
 
@@ -2809,20 +2805,18 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                     if let Some(proc) = ty.get_proc(name) {
                         // Emit a DcAnnotationEntry so the langserver can resolve go-to-definition
                         // on follow calls whose receiver is a proc result (not a plain ident chain).
-                        DC_ANNOTATIONS.with(|cell| {
-                            if let Some(ref mut entries) = *cell.borrow_mut() {
-                                let op_len = kind.name().len() as u16;
-                                let ident_start = location.add_columns(op_len);
-                                let ident_end = location.add_columns(op_len + name.as_str().len() as u16);
-                                let type_parts: Vec<Ident> = ty
-                                    .path
-                                    .split('/')
-                                    .filter(|s| !s.is_empty())
-                                    .map(Ident::from_nonstatic)
-                                    .collect();
-                                entries.push((ident_start, ident_end, type_parts, name.clone()));
-                            }
-                        });
+                        {
+                            let op_len = kind.name().len() as u16;
+                            let ident_start = location.add_columns(op_len);
+                            let ident_end = location.add_columns(op_len + name.as_str().len() as u16);
+                            let type_parts: Vec<Ident> = ty
+                                .path
+                                .split('/')
+                                .filter(|s| !s.is_empty())
+                                .map(Ident::from_nonstatic)
+                                .collect();
+                            self.env.dc_entries.push((ident_start, ident_end, type_parts, name.clone()));
+                        }
                         if let Some((privateproc, true, decllocation)) =
                             self.env.private.get_self_or_parent(proc)
                         {

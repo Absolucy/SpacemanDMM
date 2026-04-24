@@ -1903,58 +1903,6 @@ impl Engine {
             }
         }
 
-        // Fallback for identifiers inside macro arguments: preprocessor expansion
-        // displaces all arg tokens to the macro call site and suppresses MacroUse
-        // annotations inside expansions, leaving nothing annotated at the actual
-        // source position. Extract text under cursor and resolve against known symbols.
-        if results.is_empty() {
-            // Use into_owned() so the borrow on self.docs is released before later self borrows.
-            let source_text: Option<String> = self.docs
-                .get_contents(&tdp.text_document.uri)
-                .ok()
-                .map(|c| c.into_owned());
-            if let Some(ref text) = source_text {
-                let line = tdp.position.line;
-                let col = tdp.position.character;
-                let cursor_loc = dm::Location {
-                    file: real_file_id,
-                    line: line + 1,
-                    column: col as u16 + 1,
-                };
-
-                // Try to resolve as a macro (define) using an interval query so only
-                // defines active at the cursor position are considered.
-                let word = document::word_at_position(text, line, col).to_owned();
-                if !word.is_empty() {
-                    let def_loc = self.defines.as_ref().and_then(|defines| {
-                        use interval_tree::range;
-                        defines.range(range(cursor_loc, cursor_loc))
-                            .find_map(|(def_range, (name, _))| {
-                                if name.as_str() == word { Some(def_range.start) } else { None }
-                            })
-                    });
-                    if let Some(loc) = def_loc {
-                        results.push(self.convert_location(loc, &Default::default(), &["/DM/preprocessor/", &word])?);
-                    }
-                }
-
-                // Try to resolve as a typepath (e.g. /datum/component/foo).
-                if results.is_empty() {
-                    let typepath = document::typepath_at_position(text, line, col).to_owned();
-                    if !typepath.is_empty() {
-                        let parts: Vec<&str> = typepath
-                            .trim_start_matches('/')
-                            .split('/')
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        if let Some(ty) = self.objtree.type_by_path(parts.iter().cloned()) {
-                            results.push(self.convert_location(ty.location, &ty.docs, &[&ty.path])?);
-                        }
-                    }
-                }
-            }
-        }
-
         if results.is_empty() {
             Ok(None)
         } else {

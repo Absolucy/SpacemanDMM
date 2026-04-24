@@ -245,67 +245,8 @@ pub fn find_word(text: &str, offset: usize) -> &str {
     }
 }
 
-/// Extract the identifier word at the given LSP position (0-indexed line/character).
-pub fn word_at_position(text: &str, line: u32, character: u32) -> &str {
-    match total_offset(text, line, character) {
-        Ok(offset) => find_word(text, offset),
-        Err(_) => "",
-    }
-}
-
 fn is_ident(ch: char) -> bool {
     ch.is_ascii_digit() || ch.is_ascii_lowercase() || ch.is_ascii_uppercase() || ch == '_'
-}
-
-/// Find the full DM typepath (e.g. `/datum/foo/bar`) spanning the character at `offset`.
-/// Returns `""` if no path-like text is found or the result doesn't begin with `/`.
-pub fn find_path(text: &str, offset: usize) -> &str {
-    // go left as far as we can over path chars (ident chars + '/')
-    let mut start = offset;
-    loop {
-        if start == 0 {
-            break;
-        }
-        let mut prev = start - 1;
-        while !text.is_char_boundary(prev) {
-            prev -= 1;
-        }
-        if !text[prev..start].chars().next().is_some_and(is_path_char) {
-            break;
-        }
-        start = prev;
-    }
-
-    // go right as far as we can
-    let mut end = offset;
-    loop {
-        if end >= text.len() {
-            break;
-        }
-        let mut next = end + 1;
-        while next < text.len() && !text.is_char_boundary(next) {
-            next += 1;
-        }
-        if !text[end..next].chars().next().is_some_and(is_path_char) {
-            break;
-        }
-        end = next;
-    }
-
-    let path = if start == end { "" } else { &text[start..end] };
-    if path.starts_with('/') { path } else { "" }
-}
-
-/// Extract a DM typepath at the given LSP position, or `""` if none.
-pub fn typepath_at_position(text: &str, line: u32, character: u32) -> &str {
-    match total_offset(text, line, character) {
-        Ok(offset) => find_path(text, offset),
-        Err(_) => "",
-    }
-}
-
-fn is_path_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '/'
 }
 
 /// An adaptation of `std::io::Cursor` which works on an `Rc<String>`, which

@@ -281,7 +281,7 @@ enum Include<'ctx> {
     Expansion {
         //name: Ident,
         location: Location,
-        tokens: VecDeque<Token>,
+        tokens: VecDeque<LocatedToken>,
     },
 }
 
@@ -324,9 +324,6 @@ impl<'ctx> IncludeStack<'ctx> {
         "".as_ref()
     }
 
-    fn in_expansion(&self) -> bool {
-        matches!(self.stack.last(), Some(Include::Expansion { .. }))
-    }
 }
 
 impl<'ctx> Iterator for IncludeStack<'ctx> {
@@ -343,11 +340,10 @@ impl<'ctx> Iterator for IncludeStack<'ctx> {
                 },
                 Some(&mut Include::Expansion {
                     ref mut tokens,
-                    location,
                     ..
                 }) => {
-                    if let Some(token) = tokens.pop_front() {
-                        return Some(LocatedToken { location, token });
+                    if let Some(lt) = tokens.pop_front() {
+                        return Some(lt);
                     }
                     // else fallthrough to pop()
                 },
@@ -572,8 +568,13 @@ impl<'ctx> Preprocessor<'ctx> {
         definition_location: Location,
         docs: Option<Rc<DocCollection>>,
     ) {
-        if self.include_stack.in_expansion() {
-            return;
+        // Suppress annotation for body tokens (which carry the call-site location and
+        // would duplicate the outer macro's annotation), but allow annotation for arg
+        // tokens (which carry their real source location and differ from the call site).
+        if let Some(Include::Expansion { location: exp_loc, .. }) = self.include_stack.stack.last() {
+            if self.last_input_loc == *exp_loc {
+                return;
+            }
         }
 
         if let Some(annotations) = self.annotations.as_mut() {
@@ -1168,10 +1169,11 @@ impl<'ctx> Preprocessor<'ctx> {
                 match expansion {
                     Some((location, Define::Constant { subst, docs })) => {
                         self.annotate_macro(ident, location, Some(docs));
+                        let call_loc = self.last_input_loc;
                         self.include_stack.stack.push(Include::Expansion {
                             //name: ident.to_owned(),
-                            tokens: subst.into_iter().collect(),
-                            location: self.last_input_loc,
+                            tokens: subst.into_iter().map(|t| LocatedToken::new(call_loc, t)).collect(),
+                            location: call_loc,
                         });
                         return Ok(());
                     },
@@ -1201,16 +1203,27 @@ impl<'ctx> Preprocessor<'ctx> {
 
                         self.annotate_macro(ident, location, Some(docs));
 
-                        // read arguments
-                        let mut args = Vec::new();
-                        let mut this_arg = Vec::new();
+                        // read arguments, preserving per-token source locations
+                        macro_rules! next_located {
+                            () => {
+                                match self.inner_next() {
+                                    Some(x) => {
+                                        _last_expected_loc = x.location;
+                                        x
+                                    },
+                                    None => return Err(self.error("unexpected EOF")),
+                                }
+                            };
+                        }
+                        let mut args: Vec<Vec<LocatedToken>> = Vec::new();
+                        let mut this_arg: Vec<LocatedToken> = Vec::new();
                         let mut parens = 0;
                         loop {
-                            let token = next!();
-                            match token {
+                            let lt = next_located!();
+                            match &lt.token {
                                 Token::Punct(Punctuation::LParen) => {
                                     parens += 1;
-                                    this_arg.push(token);
+                                    this_arg.push(lt);
                                 },
                                 Token::Punct(Punctuation::RParen) => {
                                     if parens == 0 {
@@ -1218,22 +1231,23 @@ impl<'ctx> Preprocessor<'ctx> {
                                         break;
                                     }
                                     parens -= 1;
-                                    this_arg.push(token);
+                                    this_arg.push(lt);
                                 },
                                 Token::Punct(Punctuation::Comma) if parens == 0 => {
                                     args.push(this_arg);
                                     this_arg = Vec::new();
                                 },
-                                _ => this_arg.push(token),
+                                _ => this_arg.push(lt),
                             }
                         }
 
                         // check for correct number of arguments
+                        let call_loc = self.last_input_loc;
                         if variadic {
                             if args.len() > params.len() {
                                 let new_arg = args
                                     .split_off(params.len() - 1)
-                                    .join(&Token::Punct(Punctuation::Comma));
+                                    .join(&LocatedToken::new(call_loc, Token::Punct(Punctuation::Comma)));
                                 args.push(new_arg);
                             } else if args.len() + 1 == params.len() {
                                 args.push(Vec::new());
@@ -1243,8 +1257,9 @@ impl<'ctx> Preprocessor<'ctx> {
                             return Err(self.error("wrong number of arguments to macro call"));
                         }
 
-                        // paste them into the expansion
-                        let mut expansion = VecDeque::new();
+                        // paste them into the expansion; arg tokens carry their real source
+                        // locations, body tokens get the call-site location
+                        let mut expansion: VecDeque<LocatedToken> = VecDeque::new();
                         let mut input = subst.iter().cloned();
                         while let Some(token) = input.next() {
                             match token {
@@ -1252,43 +1267,43 @@ impl<'ctx> Preprocessor<'ctx> {
                                 Token::Ident(ident, ws) => {
                                     match params.iter().position(|x| *x == ident) {
                                         Some(i) => expansion.extend(args[i].iter().cloned()),
-                                        None => expansion.push_back(Token::Ident(ident, ws)),
+                                        None => expansion.push_back(LocatedToken::new(call_loc, Token::Ident(ident, ws))),
                                     }
                                 },
                                 // token paste = concat two idents together, if at all possible
                                 Token::Punct(Punctuation::TokenPaste) => {
                                     match (expansion.pop_back(), input.next()) {
                                         (
-                                            Some(Token::Ident(first, ws1)),
+                                            Some(LocatedToken { token: Token::Ident(first, ws1), location: first_loc }),
                                             Some(Token::Ident(param_name, ws)),
                                         ) => match params.iter().position(|x| *x == param_name) {
                                             Some(i) => {
                                                 let mut arg = args[i].iter().cloned();
                                                 match arg.next() {
-                                                    Some(Token::Ident(param_ident, ws)) => {
-                                                        expansion.push_back(Token::Ident(
+                                                    Some(LocatedToken { token: Token::Ident(param_ident, _), .. }) => {
+                                                        expansion.push_back(LocatedToken::new(first_loc, Token::Ident(
                                                             format!("{first}{param_ident}").into(),
                                                             ws,
-                                                        ));
+                                                        )));
                                                     },
-                                                    Some(Token::Int(param_int)) => expansion
-                                                        .push_back(Token::Ident(
+                                                    Some(LocatedToken { token: Token::Int(param_int), .. }) => {
+                                                        expansion.push_back(LocatedToken::new(first_loc, Token::Ident(
                                                             format!("{first}{param_int}").into(),
                                                             ws,
-                                                        )),
+                                                        )));
+                                                    },
                                                     Some(other) => {
-                                                        expansion
-                                                            .push_back(Token::Ident(first, ws1));
+                                                        expansion.push_back(LocatedToken::new(first_loc, Token::Ident(first, ws1)));
                                                         expansion.push_back(other);
                                                     },
                                                     None => {},
                                                 }
                                                 expansion.extend(arg);
                                             },
-                                            None => expansion.push_back(Token::Ident(
+                                            None => expansion.push_back(LocatedToken::new(first_loc, Token::Ident(
                                                 format!("{first}{param_name}").into(),
                                                 ws,
-                                            )),
+                                            ))),
                                         },
                                         (non_ident_first, Some(Token::Ident(second, ws))) => {
                                             expansion.extend(non_ident_first);
@@ -1297,13 +1312,15 @@ impl<'ctx> Preprocessor<'ctx> {
                                                     expansion.extend(args[i].iter().cloned())
                                                 },
                                                 None => {
-                                                    expansion.push_back(Token::Ident(second, ws))
+                                                    expansion.push_back(LocatedToken::new(call_loc, Token::Ident(second, ws)))
                                                 },
                                             }
                                         },
                                         (non_ident_first, non_ident_second) => {
                                             expansion.extend(non_ident_first);
-                                            expansion.extend(non_ident_second);
+                                            if let Some(t) = non_ident_second {
+                                                expansion.push_back(LocatedToken::new(call_loc, t));
+                                            }
                                         },
                                     }
                                     // read the next ident and concat it into the previous ident
@@ -1319,13 +1336,13 @@ impl<'ctx> Preprocessor<'ctx> {
                                                     if !string.is_empty() {
                                                         string.push(' ');
                                                     }
-                                                    let _e = write!(string, "{each}");
+                                                    let _e = write!(string, "{}", each.token);
                                                     #[cfg(debug_assertions)]
                                                     {
                                                         _e.unwrap();
                                                     }
                                                 }
-                                                expansion.push_back(Token::String(string));
+                                                expansion.push_back(LocatedToken::new(call_loc, Token::String(string)));
                                             },
                                             None => {
                                                 return Err(DMError::new(
@@ -1350,13 +1367,13 @@ impl<'ctx> Preprocessor<'ctx> {
                                         ))
                                     },
                                 },
-                                _ => expansion.push_back(token),
+                                _ => expansion.push_back(LocatedToken::new(call_loc, token)),
                             }
                         }
                         self.include_stack.stack.push(Include::Expansion {
                             //name: ident.to_owned(),
                             tokens: expansion,
-                            location: self.last_input_loc,
+                            location: call_loc,
                         });
                         return Ok(());
                     },
