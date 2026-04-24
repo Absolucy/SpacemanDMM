@@ -163,7 +163,7 @@ fn line_offset(text: &str, line_number: u32) -> Result<usize, jsonrpc::Error> {
     Ok(start_pos)
 }
 
-fn total_offset(text: &str, line: u32, mut character: u32) -> Result<usize, jsonrpc::Error> {
+pub fn total_offset(text: &str, line: u32, mut character: u32) -> Result<usize, jsonrpc::Error> {
     let start = line_offset(text, line)?;
 
     // column is measured in UTF-16 code units, which is really inconvenient.
@@ -209,6 +209,9 @@ pub fn find_word(text: &str, offset: usize) -> &str {
     // go left as far as we can
     let mut start = offset;
     loop {
+        if start == 0 {
+            break;
+        }
         let mut start_next = start - 1;
         while !text.is_char_boundary(start_next) {
             start_next -= 1;
@@ -222,8 +225,11 @@ pub fn find_word(text: &str, offset: usize) -> &str {
     // go right as far as we can
     let mut end = offset;
     loop {
+        if end >= text.len() {
+            break;
+        }
         let mut end_next = end + 1;
-        while !text.is_char_boundary(end_next) {
+        while end_next < text.len() && !text.is_char_boundary(end_next) {
             end_next += 1;
         }
         if !text[end..end_next].chars().next().is_some_and(is_ident) {
@@ -236,6 +242,14 @@ pub fn find_word(text: &str, offset: usize) -> &str {
         ""
     } else {
         &text[start..end]
+    }
+}
+
+/// Extract the identifier word at the given LSP position (0-indexed line/character).
+pub fn word_at_position(text: &str, line: u32, character: u32) -> &str {
+    match total_offset(text, line, character) {
+        Ok(offset) => find_word(text, offset),
+        Err(_) => "",
     }
 }
 

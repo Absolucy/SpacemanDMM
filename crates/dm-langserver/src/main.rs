@@ -766,7 +766,7 @@ impl Engine {
                         // selective definition deletion/reintroduction is implemented.
                         self.objtree = Arc::new(parser.parse_object_tree());
                     }
-                    pp.finalize();
+                    self.defines = Some(pp.finalize());
                     let dc_ann = dreamchecker::run_with_annotations(&self.context, &self.objtree);
                     *self.dc_annotations.lock().unwrap() = dc_ann;
 
@@ -1899,6 +1899,39 @@ impl Engine {
                         break;
                     }
                     next = ty.parent_type_without_root();
+                }
+            }
+        }
+
+        // Fallback for identifiers inside macro arguments: preprocessor expansion
+        // displaces all arg tokens to the macro call site and suppresses MacroUse
+        // annotations inside expansions, leaving nothing annotated at the actual
+        // source position. Extract the word from source text and resolve it against
+        // the defines table using an interval query for only active-at-cursor defines.
+        if results.is_empty() {
+            let word: String = self.docs
+                .get_contents(&tdp.text_document.uri)
+                .map(|text| document::word_at_position(&text, tdp.position.line, tdp.position.character).to_owned())
+                .unwrap_or_default();
+            if !word.is_empty() {
+                let cursor_loc = dm::Location {
+                    file: real_file_id,
+                    line: tdp.position.line + 1,
+                    column: tdp.position.character as u16 + 1,
+                };
+                let def_loc = self.defines.as_ref().and_then(|defines| {
+                    use interval_tree::range;
+                    defines.range(range(cursor_loc, cursor_loc))
+                        .find_map(|(def_range, (name, _))| {
+                            if name.as_str() == word {
+                                Some(def_range.start)
+                            } else {
+                                None
+                            }
+                        })
+                });
+                if let Some(loc) = def_loc {
+                    results.push(self.convert_location(loc, &Default::default(), &["/DM/preprocessor/", &word])?);
                 }
             }
         }
