@@ -174,6 +174,48 @@ fn signal_dispatch_does_not_count_as_sleeping() {
 }
 
 #[test]
+fn every_builtin_that_parks_counts() {
+    let code = r##"
+/proc/quiet()
+/proc/starts()
+    startup("x.dmb", 0)
+/proc/shuts(addr)
+    shutdown(addr)
+/proc/medal()
+    world.GetMedal("m", "k")
+/proc/page(client/C)
+    C.SendPage("hi", "k")
+/proc/icon(client/C)
+    C.RenderIcon(null)
+/proc/opens()
+    var/savefile/S = new /savefile("x.sav")
+/proc/locks(savefile/S)
+    S.Lock(1)
+/proc/background_loop()
+    set background = 1
+    for(var/i in 1 to 10)
+        quiet()
+"##
+    .trim();
+    let allowlist = sleep_allowlist_for_test(code, 3);
+    assert!(admitted(&allowlist, "/proc/quiet"));
+    let wrongly_admitted: Vec<_> = [
+        "/proc/starts",
+        "/proc/shuts",
+        "/proc/medal",
+        "/proc/page",
+        "/proc/icon",
+        "/proc/opens",
+        "/proc/locks",
+        "/proc/background_loop",
+    ]
+    .into_iter()
+    .filter(|path| admitted(&allowlist, path))
+    .collect();
+    assert!(wrongly_admitted.is_empty(), "{wrongly_admitted:?}");
+}
+
+#[test]
 fn a_redefined_proc_is_admitted_only_if_every_copy_is() {
     let code = r##"
 /proc/twice()

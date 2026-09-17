@@ -2125,15 +2125,21 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                 mode: SettingMode::Assign,
                 value,
             } => {
-                if *name != ident!("waitfor") {
-                    return ControlFlow::allfalse();
-                }
-                if match value.as_term() {
+                let is_false = match value.as_term() {
                     Some(Term::Int(0)) => true,
                     Some(Term::Ident(i)) if *i == ident!("FALSE") => true,
                     _ => false,
-                } {
+                };
+                if *name == ident!("waitfor") && is_false {
                     self.env.waitfor_procs.insert(self.proc_ref);
+                }
+                // a background proc parks itself mid-loop once its time runs out
+                if *name == ident!("background") && !is_false {
+                    self.env.sleeping_procs.insert_violator(
+                        self.proc_ref,
+                        "set background",
+                        location,
+                    );
                 }
             },
             Statement::Setting { .. } => {},
@@ -2649,7 +2655,13 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                 if self.inside_newcontext == 0
                     && matches!(
                         unscoped_name.as_str(),
-                        "sleep" | "alert" | "shell" | "winexists" | "winget"
+                        "sleep"
+                            | "alert"
+                            | "shell"
+                            | "winexists"
+                            | "winget"
+                            | "startup"
+                            | "shutdown"
                     )
                 {
                     self.env
@@ -2883,6 +2895,13 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
         args: &'o Option<Box<[Expression]>>,
         local_vars: &mut HashMap<Ident, LocalVar<'o>>,
     ) -> Analysis<'o> {
+        // opening a savefile someone else has locked waits for the lock
+        if self.inside_newcontext == 0 && typepath.is_subtype_of(&self.objtree.expect("/savefile"))
+        {
+            self.env
+                .sleeping_procs
+                .insert_violator(self.proc_ref, "new /savefile", location);
+        }
         if let Some(new_proc) = typepath.get_proc("New") {
             self.visit_call(
                 location,
@@ -2917,29 +2936,49 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
         }
     }
 
+    /// Builtin procs that wait on a client, the hub, or another world. The list
+    /// is every builtin arm that parks its caller in BYOND 516.1687, Windows
+    /// and Linux (byond-re `vm/sleep_and_suspend.md`).
     fn check_type_sleepers(&mut self, ty: TypeRef<'o>, location: Location, unscoped_name: &str) {
-        match ty.get().path.as_str() {
-            "/client" => {
-                if self.inside_newcontext == 0
-                    && matches!(unscoped_name, "SoundQuery" | "MeasureText")
-                {
-                    self.env.sleeping_procs.insert_violator(
-                        self.proc_ref,
-                        format!("client.{unscoped_name}").as_str(),
-                        location,
-                    );
-                }
-            },
-            "/world"
-                if self.inside_newcontext == 0 && matches!(unscoped_name, "Import" | "Export") =>
-            {
-                self.env.sleeping_procs.insert_violator(
-                    self.proc_ref,
-                    format!("world.{unscoped_name}").as_str(),
-                    location,
-                );
-            },
-            _ => {},
+        if self.inside_newcontext != 0 {
+            return;
+        }
+        let path = ty.get().path.as_str();
+        let sleeps = match path {
+            "/client" => matches!(
+                unscoped_name,
+                "Import"
+                    | "Export"
+                    | "SendPage"
+                    | "CheckPassport"
+                    | "SoundQuery"
+                    | "MeasureText"
+                    | "RenderIcon"
+                    | "GetAPI"
+                    | "SetAPI"
+            ),
+            "/world" => matches!(
+                unscoped_name,
+                "Import"
+                    | "Export"
+                    | "GetScores"
+                    | "SetScores"
+                    | "GetMedal"
+                    | "SetMedal"
+                    | "ClearMedal"
+                    | "GetCredits"
+                    | "PayCredits"
+                    | "AddCredits"
+                    | "IsSubscribed"
+            ),
+            _ => ty.is_subtype_of(&self.objtree.expect("/savefile")) && unscoped_name == "Lock",
+        };
+        if sleeps {
+            self.env.sleeping_procs.insert_violator(
+                self.proc_ref,
+                format!("{path}.{unscoped_name}").as_str(),
+                location,
+            );
         }
     }
 
