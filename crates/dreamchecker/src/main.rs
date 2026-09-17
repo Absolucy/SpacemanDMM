@@ -17,6 +17,8 @@ fn main() {
     let mut config_file = None;
     let mut json = false;
     let mut parse_only = false;
+    let mut sleep_verdicts = None;
+    let mut unresolved_calls_sleep = true;
 
     let mut args = std::env::args();
     let _ = args.next(); // skip executable name
@@ -42,6 +44,13 @@ fn main() {
             json = true;
         } else if arg == "--parse-only" {
             parse_only = true;
+        } else if arg == "--sleep-verdicts" {
+            sleep_verdicts = Some(
+                args.next()
+                    .expect("must specify a file for --sleep-verdicts"),
+            );
+        } else if arg == "--assume-unresolved-calls-dont-sleep" {
+            unresolved_calls_sleep = false;
         } else {
             eprintln!("unknown argument: {arg}");
             return;
@@ -67,6 +76,14 @@ fn main() {
         },
     };
 
+    // Version 2 follows every override a receiver's type allows, which is
+    // too broad to leave anything worth compiling.
+    let version = context.config().dreamchecker.sleep_analysis_version;
+    if sleep_verdicts.is_some() && !(version == 1 || version >= 3) {
+        eprintln!("--sleep-verdicts needs sleep_analysis_version 1 or 3, not {version}");
+        std::process::exit(2);
+    }
+
     println!("============================================================");
     println!("Parsing {}...\n", dme.display());
     let pp = context.unwrap(dm::Preprocessor::new(&context, dme));
@@ -75,7 +92,16 @@ fn main() {
     let (fatal_errored, tree) = parser.parse_object_tree_2();
 
     if !parse_only && !fatal_errored {
-        dreamchecker::run_cli(&context, &tree);
+        match &sleep_verdicts {
+            Some(out) => {
+                let mut allowlist =
+                    dreamchecker::run_cli_sleep_allowlist(&context, &tree, unresolved_calls_sleep)
+                        .join("\n");
+                allowlist.push('\n');
+                std::fs::write(out, allowlist).expect("failed to write --sleep-verdicts file");
+            },
+            None => dreamchecker::run_cli(&context, &tree),
+        }
     }
 
     println!("============================================================");

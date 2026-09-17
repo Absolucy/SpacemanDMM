@@ -17,6 +17,7 @@ mod type_expr;
 use type_expr::TypeExpr;
 mod switch_rand_range;
 use switch_rand_range::check_switch_rand_range;
+mod sleep_verdicts;
 
 #[doc(hidden)] // Intended for the tests only.
 pub mod test_helpers;
@@ -350,15 +351,29 @@ impl<'o> From<StaticType<'o>> for Analysis<'o> {
 
 /// Run DreamChecker, registering diagnostics to the context.
 pub fn run(context: &Context, objtree: &ObjectTree) {
-    run_inner(context, objtree, false)
+    run_inner(context, objtree, false);
 }
 
 /// Run DreamChecker, registering diagnostics and printing progress to stdout.
 pub fn run_cli(context: &Context, objtree: &ObjectTree) {
-    run_inner(context, objtree, true)
+    run_inner(context, objtree, true);
 }
 
-fn run_inner(context: &Context, objtree: &ObjectTree, cli: bool) {
+/// Like `run_cli`, then returns the path of every proc that can never park
+/// its caller, as the `.dmb` spells it. See `sleep_verdicts`.
+pub fn run_cli_sleep_allowlist(
+    context: &Context,
+    objtree: &ObjectTree,
+    unresolved_calls_sleep: bool,
+) -> Vec<String> {
+    sleep_verdicts::allowlist(&run_inner(context, objtree, true), unresolved_calls_sleep)
+}
+
+fn run_inner<'o>(
+    context: &'o Context,
+    objtree: &'o ObjectTree,
+    cli: bool,
+) -> AnalyzeObjectTree<'o> {
     macro_rules! cli_println {
         ($($rest:tt)*) => {
             if cli { println!($($rest)*) }
@@ -406,6 +421,7 @@ fn run_inner(context: &Context, objtree: &ObjectTree, cli: bool) {
     cli_println!("============================================================");
     cli_println!("Analyzing proc call tree...\n");
     analyzer.check_proc_call_tree();
+    analyzer
 }
 
 // ----------------------------------------------------------------------------
@@ -669,6 +685,8 @@ pub struct AnalyzeObjectTree<'o> {
     impure_procs: ViolatingProcs<'o>,
     /// Procs with waitfor=0 or waitfor=FALSE
     waitfor_procs: HashSet<ProcRef<'o>>,
+    /// Procs with a call outside `spawn` that got no call tree edge.
+    unresolved_calls: HashSet<ProcRef<'o>>,
 
     sleeping_overrides: ViolatingOverrides<'o>,
     impure_overrides: ViolatingOverrides<'o>,
@@ -721,6 +739,7 @@ impl<'o> AnalyzeObjectTree<'o> {
             sleeping_procs: Default::default(),
             impure_procs: Default::default(),
             waitfor_procs: Default::default(),
+            unresolved_calls: Default::default(),
             sleeping_overrides: Default::default(),
             impure_overrides: Default::default(),
             sleep_analysis_version: context.config().dreamchecker.sleep_analysis_version.into(),
@@ -2658,6 +2677,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                     }
                     Analysis::empty()
                 } else {
+                    self.unresolved_call();
                     error(
                         location,
                         format!("undefined proc: {:?} on {}", unscoped_name, self.ty),
@@ -2696,6 +2716,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                         local_vars,
                     )
                 } else {
+                    self.unresolved_call();
                     error(location, format!("undefined global proc: {global_name:?}"))
                         .register(self.context);
                     Analysis::empty()
@@ -2706,6 +2727,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                 if let Some(hint) = type_hint {
                     self.visit_new(location, hint, args, local_vars)
                 } else {
+                    self.unresolved_call();
                     error(location, "no type hint available on implicit new()")
                         .with_errortype("no_typehint_implicit_new")
                         .register(self.context);
@@ -2717,6 +2739,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                     // TODO: handle proc/verb paths here
                     self.visit_new(location, nav.ty(), args, local_vars)
                 } else {
+                    self.unresolved_call();
                     error(location, format!("failed to resolve path {}", prefab.path))
                         .register(self.context);
                     Analysis::empty()
@@ -2724,6 +2747,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
             },
             Term::NewMiniExpr { .. } => {
                 // TODO: evaluate
+                self.unresolved_call();
                 Analysis::empty()
             },
 
@@ -2885,6 +2909,14 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
         assumption_set![Assumption::IsType(true, typepath)].into()
     }
 
+    /// A call that gets no call tree edge. The sleep verdicts can't see what
+    /// it runs, so they have to assume it sleeps.
+    fn unresolved_call(&mut self) {
+        if self.inside_newcontext == 0 {
+            self.env.unresolved_calls.insert(self.proc_ref);
+        }
+    }
+
     fn check_type_sleepers(&mut self, ty: TypeRef<'o>, location: Location, unscoped_name: &str) {
         match ty.get().path.as_str() {
             "/client" => {
@@ -2925,6 +2957,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
             Follow::Field(PropertyAccessKind::SafeColon, _) => Analysis::empty(),
             Follow::Call(PropertyAccessKind::Colon, _, args)
             | Follow::Call(PropertyAccessKind::SafeColon, _, args) => {
+                self.unresolved_call();
                 // No analysis yet, but be sure to visit the arguments
                 for arg in args.iter() {
                     let mut argument_value = arg;
@@ -3110,6 +3143,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                             .with_errortype("private_proc")
                             .with_note(decllocation, "prohibited by this private_proc annotation")
                             .register(self.context);
+                            self.unresolved_call();
                             return Analysis::empty(); // dont double up with visit_call()
                         } else if let Some((protectedproc, true, decllocation)) =
                             self.env.protected.get_self_or_parent(proc)
@@ -3137,11 +3171,13 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                             local_vars,
                         )
                     } else {
+                        self.unresolved_call();
                         error(location, format!("undefined proc: {name:?} on {ty}"))
                             .register(self.context);
                         Analysis::empty()
                     }
                 } else {
+                    self.unresolved_call();
                     error(
                         location,
                         format!("proc call requires static type: {name:?}"),

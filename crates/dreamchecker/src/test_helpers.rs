@@ -1,7 +1,7 @@
 use dm::Context;
 use std::borrow::Cow;
 
-use crate::run_inner;
+use crate::{run_inner, sleep_verdicts};
 
 pub fn parse_a_file_for_test<S: Into<Cow<'static, str>>>(
     buffer: S,
@@ -19,6 +19,39 @@ pub fn parse_a_file_for_test<S: Into<Cow<'static, str>>>(
     run_inner(&context, &tree, false);
 
     context
+}
+
+/// The `--sleep-verdicts` allowlist for `buffer` under one analysis version.
+pub fn sleep_allowlist_for_test<S: Into<Cow<'static, str>>>(
+    buffer: S,
+    sleep_analysis_version: u8,
+) -> Vec<String> {
+    sleep_allowlist_with(buffer, sleep_analysis_version, true)
+}
+
+/// Like `sleep_allowlist_for_test`, with `--assume-unresolved-calls-dont-sleep`.
+pub fn sleep_allowlist_trusting_unresolved_for_test<S: Into<Cow<'static, str>>>(
+    buffer: S,
+    sleep_analysis_version: u8,
+) -> Vec<String> {
+    sleep_allowlist_with(buffer, sleep_analysis_version, false)
+}
+
+fn sleep_allowlist_with<S: Into<Cow<'static, str>>>(
+    buffer: S,
+    sleep_analysis_version: u8,
+    unresolved_calls_sleep: bool,
+) -> Vec<String> {
+    let mut config = dm::config::Config::default();
+    config.dreamchecker.sleep_analysis_version = sleep_analysis_version;
+    let mut context = Context::default();
+    context.set_config(config);
+    let pp = dm::Preprocessor::from_buffer(&context, "unit_tests.rs".into(), buffer.into());
+    let mut parser = dm::Parser::new(&context, pp);
+    parser.enable_procs();
+    let tree = parser.parse_object_tree();
+
+    sleep_verdicts::allowlist(&run_inner(&context, &tree, false), unresolved_calls_sleep)
 }
 
 pub fn check_errors_match<S: Into<Cow<'static, str>>>(buffer: S, errorlist: &[(u32, u16, &str)]) {
