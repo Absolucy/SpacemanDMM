@@ -174,8 +174,8 @@ impl<'o> CallGraph<'o> {
 }
 
 /// Paths of the procs that can never park their caller, spelled the way the
-/// `.dmb` spells them. A path defined more than once (a redefinition on the
-/// same type) is listed only if every copy is safe.
+/// `.dmb` spells them. Copies that share a spelling (two overrides on one
+/// type) are listed only if every copy is safe.
 pub fn allowlist(analyzer: &AnalyzeObjectTree, unresolved_calls_sleep: bool) -> Vec<String> {
     let mut safe_by_path: BTreeMap<String, bool> = BTreeMap::new();
     for (proc, parks) in analyzer.sleep_verdicts(unresolved_calls_sleep) {
@@ -187,8 +187,10 @@ pub fn allowlist(analyzer: &AnalyzeObjectTree, unresolved_calls_sleep: bool) -> 
         .collect()
 }
 
-/// The `.dmb` keeps `/proc/` or `/verb/` only on the type that declares the
-/// proc, so an override is `/turf/open/process_cell`.
+/// The `.dmb` keeps `/proc/` or `/verb/` only on the copy that declares the
+/// proc, so an override is `/turf/open/process_cell` and a redefinition on the
+/// declaring type is `/turf/ChangeTurf`. The object tree always keeps the
+/// declaring copy first.
 fn dmb_path(proc: ProcRef) -> String {
     let ty = proc.ty();
     match ty
@@ -197,7 +199,9 @@ fn dmb_path(proc: ProcRef) -> String {
         .get(proc.name())
         .and_then(|type_proc| type_proc.declaration.as_ref())
     {
-        Some(declaration) => format!("{}/{}/{}", ty.path, declaration.kind, proc.name()),
-        None => format!("{}/{}", ty.path, proc.name()),
+        Some(declaration) if proc.index() == 0 => {
+            format!("{}/{}/{}", ty.path, declaration.kind, proc.name())
+        },
+        _ => format!("{}/{}", ty.path, proc.name()),
     }
 }

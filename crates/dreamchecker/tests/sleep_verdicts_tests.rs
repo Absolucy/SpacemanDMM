@@ -215,13 +215,60 @@ fn every_builtin_that_parks_counts() {
     assert!(wrongly_admitted.is_empty(), "{wrongly_admitted:?}");
 }
 
+// dm.exe 516.1687 keeps proc/ or verb/ only on the copy that declares the proc:
+// /proc/twice then /twice, /datum/proc/quiet then /datum/quiet
 #[test]
-fn a_redefined_proc_is_admitted_only_if_every_copy_is() {
+fn a_redefinition_on_the_declaring_type_is_spelled_without_proc() {
     let code = r##"
 /proc/twice()
-/proc/twice()
+/twice()
+    ..()
+/datum/proc/quiet()
+/datum/quiet()
+    ..()
+/datum/proc/loud()
+/datum/loud()
     sleep(1)
 "##
     .trim();
-    assert!(!admitted(&sleep_allowlist_for_test(code, 3), "/proc/twice"));
+    for version in [1, 3] {
+        let allowlist = sleep_allowlist_for_test(code, version);
+        assert!(admitted(&allowlist, "/proc/twice"), "v{version}");
+        assert!(admitted(&allowlist, "/twice"), "v{version}");
+        assert!(admitted(&allowlist, "/datum/proc/quiet"), "v{version}");
+        assert!(admitted(&allowlist, "/datum/quiet"), "v{version}");
+        assert!(admitted(&allowlist, "/datum/proc/loud"), "v{version}");
+        assert!(!admitted(&allowlist, "/datum/loud"), "v{version}");
+    }
+}
+
+#[test]
+fn a_redefinition_that_calls_a_sleeping_original_sleeps() {
+    let code = r##"
+/datum/proc/loud()
+    sleep(1)
+/datum/loud()
+    ..()
+"##
+    .trim();
+    let allowlist = sleep_allowlist_for_test(code, 3);
+    assert!(!admitted(&allowlist, "/datum/proc/loud"));
+    assert!(!admitted(&allowlist, "/datum/loud"));
+}
+
+// two overrides on one type share a spelling in the .dmb, so one listing
+// covers both
+#[test]
+fn copies_that_share_a_spelling_are_admitted_only_if_every_copy_is() {
+    let code = r##"
+/datum/proc/act()
+/datum/child/act()
+/datum/child/act()
+    sleep(1)
+"##
+    .trim();
+    assert!(!admitted(
+        &sleep_allowlist_for_test(code, 3),
+        "/datum/child/act"
+    ));
 }
