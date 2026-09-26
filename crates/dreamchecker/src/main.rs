@@ -19,6 +19,7 @@ fn main() {
     let mut parse_only = false;
     let mut sleep_verdicts = None;
     let mut unresolved_calls_sleep = true;
+    let mut unresolved_new_sleeps = true;
 
     let mut args = std::env::args();
     let _ = args.next(); // skip executable name
@@ -51,6 +52,9 @@ fn main() {
             );
         } else if arg == "--assume-unresolved-calls-dont-sleep" {
             unresolved_calls_sleep = false;
+            unresolved_new_sleeps = false;
+        } else if arg == "--assume-new-of-variable-doesnt-sleep" {
+            unresolved_new_sleeps = false;
         } else {
             eprintln!("unknown argument: {arg}");
             return;
@@ -94,9 +98,13 @@ fn main() {
     if !parse_only && !fatal_errored {
         match &sleep_verdicts {
             Some(out) => {
-                let mut allowlist =
-                    dreamchecker::run_cli_sleep_allowlist(&context, &tree, unresolved_calls_sleep)
-                        .join("\n");
+                let mut allowlist = dreamchecker::run_cli_sleep_allowlist(
+                    &context,
+                    &tree,
+                    unresolved_calls_sleep,
+                    unresolved_new_sleeps,
+                )
+                .join("\n");
                 allowlist.push('\n');
                 std::fs::write(out, allowlist).expect("failed to write --sleep-verdicts file");
             },

@@ -365,8 +365,13 @@ pub fn run_cli_sleep_allowlist(
     context: &Context,
     objtree: &ObjectTree,
     unresolved_calls_sleep: bool,
+    unresolved_new_sleeps: bool,
 ) -> Vec<String> {
-    sleep_verdicts::allowlist(&run_inner(context, objtree, true), unresolved_calls_sleep)
+    sleep_verdicts::allowlist(
+        &run_inner(context, objtree, true),
+        unresolved_calls_sleep,
+        unresolved_new_sleeps,
+    )
 }
 
 fn run_inner<'o>(
@@ -687,6 +692,9 @@ pub struct AnalyzeObjectTree<'o> {
     waitfor_procs: HashSet<ProcRef<'o>>,
     /// Procs with a call outside `spawn` that got no call tree edge.
     unresolved_calls: HashSet<ProcRef<'o>>,
+    /// Procs with a `new some_var()` outside `spawn` whose type nothing
+    /// declares, so there's no `New()` to follow.
+    unresolved_new_calls: HashSet<ProcRef<'o>>,
 
     sleeping_overrides: ViolatingOverrides<'o>,
     impure_overrides: ViolatingOverrides<'o>,
@@ -740,6 +748,7 @@ impl<'o> AnalyzeObjectTree<'o> {
             impure_procs: Default::default(),
             waitfor_procs: Default::default(),
             unresolved_calls: Default::default(),
+            unresolved_new_calls: Default::default(),
             sleeping_overrides: Default::default(),
             impure_overrides: Default::default(),
             sleep_analysis_version: context.config().dreamchecker.sleep_analysis_version.into(),
@@ -2737,7 +2746,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
 
             Term::NewImplicit { args } => {
                 if let Some(hint) = type_hint {
-                    self.visit_new(location, hint, args, local_vars)
+                    self.visit_new(location, hint, args, true, local_vars)
                 } else {
                     self.unresolved_call();
                     error(location, "no type hint available on implicit new()")
@@ -2749,7 +2758,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
             Term::NewPrefab { prefab, args } => {
                 if let Some(nav) = self.ty.navigate_path(prefab.path.as_slice()) {
                     // TODO: handle proc/verb paths here
-                    self.visit_new(location, nav.ty(), args, local_vars)
+                    self.visit_new(location, nav.ty(), args, true, local_vars)
                 } else {
                     self.unresolved_call();
                     error(location, format!("failed to resolve path {}", prefab.path))
@@ -2757,10 +2766,20 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                     Analysis::empty()
                 }
             },
-            Term::NewMiniExpr { .. } => {
-                // TODO: evaluate
-                self.unresolved_call();
-                Analysis::empty()
+            Term::NewMiniExpr { expr, args } => {
+                match self
+                    .mini_expr_type(location, expr, local_vars)
+                    .or(type_hint)
+                {
+                    Some(ty) => self.visit_new(location, ty, args, false, local_vars),
+                    None => {
+                        self.unresolved_new();
+                        if let Some(args) = args {
+                            self.visit_arguments(location, args, local_vars);
+                        }
+                        Analysis::empty()
+                    },
+                }
             },
 
             Term::List(args) => {
@@ -2893,6 +2912,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
         location: Location,
         typepath: TypeRef<'o>,
         args: &'o Option<Box<[Expression]>>,
+        is_exact: bool,
         local_vars: &mut HashMap<Ident, LocalVar<'o>>,
     ) -> Analysis<'o> {
         // opening a savefile someone else has locked waits for the lock
@@ -2908,9 +2928,9 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                 typepath,
                 new_proc,
                 args.as_ref().map_or(&[], |v| &v[..]),
-                // New calls are exact: `new /datum()` will always call
-                // `/datum/New()` and never an override.
-                true,
+                // `new /datum()` always calls `/datum/New()` and never an
+                // override, but `new some_var()` can make any subtype.
+                is_exact,
                 false,
                 local_vars,
             );
@@ -2934,6 +2954,40 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
         if self.inside_newcontext == 0 {
             self.env.unresolved_calls.insert(self.proc_ref);
         }
+    }
+
+    fn unresolved_new(&mut self) {
+        if self.inside_newcontext == 0 {
+            self.env.unresolved_new_calls.insert(self.proc_ref);
+        }
+    }
+
+    /// The declared type of the variable in `new some_var()` or
+    /// `new a.b.some_var()`. Trusted like any other declared type, DM
+    /// doesn't enforce it.
+    fn mini_expr_type(
+        &mut self,
+        location: Location,
+        expr: &MiniExpr,
+        local_vars: &HashMap<Ident, LocalVar<'o>>,
+    ) -> Option<TypeRef<'o>> {
+        let mut ty = match local_vars.get(&expr.ident) {
+            Some(var) => var.analysis.static_ty.basic_type()?,
+            None => {
+                let decl = self.ty.get_var_declaration(&expr.ident)?;
+                self.env
+                    .static_type(location, decl.var_type.type_path.as_slice())
+                    .basic_type()?
+            },
+        };
+        for field in expr.fields.iter() {
+            let decl = ty.get_var_declaration(&field.ident)?;
+            ty = self
+                .env
+                .static_type(location, decl.var_type.type_path.as_slice())
+                .basic_type()?;
+        }
+        Some(ty)
     }
 
     /// Builtin procs that wait on a client, the hub, or another world. The list

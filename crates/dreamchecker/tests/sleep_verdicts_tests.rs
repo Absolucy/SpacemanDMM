@@ -1,5 +1,6 @@
 use dreamchecker::test_helpers::{
-    sleep_allowlist_for_test, sleep_allowlist_trusting_unresolved_for_test,
+    sleep_allowlist_for_test, sleep_allowlist_trusting_new_of_variable_for_test,
+    sleep_allowlist_trusting_unresolved_for_test,
 };
 
 fn admitted(allowlist: &[String], path: &str) -> bool {
@@ -60,6 +61,56 @@ fn trusting_unresolved_calls_admits_them_but_not_real_sleeps() {
     let allowlist = sleep_allowlist_trusting_unresolved_for_test(code, 3);
     assert!(admitted(&allowlist, "/proc/untyped"));
     assert!(!admitted(&allowlist, "/proc/sleeper"));
+}
+
+#[test]
+fn new_of_a_typed_variable_checks_that_types_new() {
+    let code = r##"
+/datum/quiet/New()
+/datum/quiet/child/New()
+    sleep(1)
+/datum/loud/New()
+    sleep(1)
+/proc/makes_quiet(datum/quiet/T)
+    new T()
+/proc/makes_loud(datum/loud/T)
+    new T()
+/proc/hinted(T)
+    var/datum/quiet/Q = new T()
+/proc/untyped(T)
+    new T()
+"##
+    .trim();
+    let v3 = sleep_allowlist_for_test(code, 3);
+    assert!(admitted(&v3, "/proc/makes_quiet"));
+    assert!(admitted(&v3, "/proc/hinted"));
+    assert!(!admitted(&v3, "/proc/makes_loud"));
+    assert!(!admitted(&v3, "/proc/untyped"));
+    // v1 follows every override, and T may hold /datum/quiet/child
+    assert!(!admitted(
+        &sleep_allowlist_for_test(code, 1),
+        "/proc/makes_quiet"
+    ));
+}
+
+#[test]
+fn trusting_new_of_variable_admits_only_that() {
+    let code = r##"
+/datum/proc/quiet()
+/proc/sleeper()
+    sleep(1)
+/proc/untyped_new(T)
+    new T()
+/proc/untyped_call(x)
+    x.quiet()
+/proc/new_with_sleeping_arg(T)
+    new T(sleeper())
+"##
+    .trim();
+    let allowlist = sleep_allowlist_trusting_new_of_variable_for_test(code, 3);
+    assert!(admitted(&allowlist, "/proc/untyped_new"));
+    assert!(!admitted(&allowlist, "/proc/untyped_call"));
+    assert!(!admitted(&allowlist, "/proc/new_with_sleeping_arg"));
 }
 
 #[test]

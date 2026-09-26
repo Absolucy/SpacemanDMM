@@ -8,9 +8,11 @@
 //! Differences from the `must_not_sleep` lint, all on purpose:
 //! - `SpacemanDMM_allowed_to_sleep` is ignored. It silences the lint, BYOND
 //!   still suspends the caller.
-//! - A call the analysis could not tie to a proc counts as sleeping. `call()()`
-//!   does not: its targets are mostly signal handlers and callbacks, which
-//!   codebases already require to not sleep, so one that does is their bug.
+//! - A call the analysis could not tie to a proc counts as sleeping, and so
+//!   does `new some_var()` when nothing declares what type `some_var` holds.
+//!   `call()()` does not: its targets are mostly signal handlers and
+//!   callbacks, which codebases already require to not sleep, so one that
+//!   does is their bug.
 //! - Override dispatch is followed transitively, not one level deep.
 //!
 //! Not a proof: declared types are trusted, and DM does not enforce them.
@@ -29,8 +31,13 @@ impl<'o> AnalyzeObjectTree<'o> {
     /// frame has nowhere for BYOND to read that from. Only a callee's does.
     ///
     /// `unresolved_calls_sleep` false assumes every call the analysis could
-    /// not tie to a proc does not sleep.
-    pub fn sleep_verdicts(&self, unresolved_calls_sleep: bool) -> Vec<(ProcRef<'o>, bool)> {
+    /// not tie to a proc does not sleep. `unresolved_new_sleeps` false does the
+    /// same for just the untyped `new some_var()` ones.
+    pub fn sleep_verdicts(
+        &self,
+        unresolved_calls_sleep: bool,
+        unresolved_new_sleeps: bool,
+    ) -> Vec<(ProcRef<'o>, bool)> {
         let mut roots = Vec::new();
         self.objtree.root().recurse(&mut |ty| {
             roots.extend(ty.iter_self_procs().filter(|proc| !proc.is_builtin()));
@@ -70,6 +77,7 @@ impl<'o> AnalyzeObjectTree<'o> {
                 let proc = graph.visits[index].proc;
                 self.sleeping_procs.violators.contains_key(&proc)
                     || (unresolved_calls_sleep && self.unresolved_calls.contains(&proc))
+                    || (unresolved_new_sleeps && self.unresolved_new_calls.contains(&proc))
             })
             .collect();
         for &index in &queue {
@@ -176,9 +184,13 @@ impl<'o> CallGraph<'o> {
 /// Paths of the procs that can never park their caller, spelled the way the
 /// `.dmb` spells them. Copies that share a spelling (two overrides on one
 /// type) are listed only if every copy is safe.
-pub fn allowlist(analyzer: &AnalyzeObjectTree, unresolved_calls_sleep: bool) -> Vec<String> {
+pub fn allowlist(
+    analyzer: &AnalyzeObjectTree,
+    unresolved_calls_sleep: bool,
+    unresolved_new_sleeps: bool,
+) -> Vec<String> {
     let mut safe_by_path: BTreeMap<String, bool> = BTreeMap::new();
-    for (proc, parks) in analyzer.sleep_verdicts(unresolved_calls_sleep) {
+    for (proc, parks) in analyzer.sleep_verdicts(unresolved_calls_sleep, unresolved_new_sleeps) {
         *safe_by_path.entry(dmb_path(proc)).or_insert(true) &= !parks;
     }
     safe_by_path

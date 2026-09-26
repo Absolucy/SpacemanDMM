@@ -26,7 +26,7 @@ pub fn sleep_allowlist_for_test<S: Into<Cow<'static, str>>>(
     buffer: S,
     sleep_analysis_version: u8,
 ) -> Vec<String> {
-    sleep_allowlist_with(buffer, sleep_analysis_version, true)
+    sleep_allowlist_with(buffer, sleep_analysis_version, true, true)
 }
 
 /// Like `sleep_allowlist_for_test`, with `--assume-unresolved-calls-dont-sleep`.
@@ -34,13 +34,22 @@ pub fn sleep_allowlist_trusting_unresolved_for_test<S: Into<Cow<'static, str>>>(
     buffer: S,
     sleep_analysis_version: u8,
 ) -> Vec<String> {
-    sleep_allowlist_with(buffer, sleep_analysis_version, false)
+    sleep_allowlist_with(buffer, sleep_analysis_version, false, false)
+}
+
+/// Like `sleep_allowlist_for_test`, with `--assume-new-of-variable-doesnt-sleep`.
+pub fn sleep_allowlist_trusting_new_of_variable_for_test<S: Into<Cow<'static, str>>>(
+    buffer: S,
+    sleep_analysis_version: u8,
+) -> Vec<String> {
+    sleep_allowlist_with(buffer, sleep_analysis_version, true, false)
 }
 
 fn sleep_allowlist_with<S: Into<Cow<'static, str>>>(
     buffer: S,
     sleep_analysis_version: u8,
     unresolved_calls_sleep: bool,
+    unresolved_new_sleeps: bool,
 ) -> Vec<String> {
     let mut config = dm::config::Config::default();
     config.dreamchecker.sleep_analysis_version = sleep_analysis_version;
@@ -51,7 +60,11 @@ fn sleep_allowlist_with<S: Into<Cow<'static, str>>>(
     parser.enable_procs();
     let tree = parser.parse_object_tree();
 
-    sleep_verdicts::allowlist(&run_inner(&context, &tree, false), unresolved_calls_sleep)
+    sleep_verdicts::allowlist(
+        &run_inner(&context, &tree, false),
+        unresolved_calls_sleep,
+        unresolved_new_sleeps,
+    )
 }
 
 pub fn check_errors_match<S: Into<Cow<'static, str>>>(buffer: S, errorlist: &[(u32, u16, &str)]) {
