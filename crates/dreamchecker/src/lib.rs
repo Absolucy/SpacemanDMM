@@ -1,26 +1,27 @@
 //! DreamChecker, a robust static analysis and typechecking engine for
 //! DreamMaker.
+#![forbid(unsafe_code)]
 #![allow(dead_code, unused_variables)]
 
-use bitflags::bitflags;
-
 extern crate dreammaker as dm;
+
+use std::collections::{BTreeMap, VecDeque};
+
+use bitflags::bitflags;
 use dm::constants::{ConstFn, Constant};
 use dm::objtree::{ObjectTree, ProcRef, TypeRef};
 use dm::{Context, DMError, Location, Severity};
 use dm::{ast::*, ident};
-
 use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use std::collections::{BTreeMap, VecDeque};
 
-mod type_expr;
-use type_expr::TypeExpr;
-mod switch_rand_range;
-use switch_rand_range::check_switch_rand_range;
 mod sleep_verdicts;
-
+mod switch_rand_range;
 #[doc(hidden)] // Intended for the tests only.
 pub mod test_helpers;
+mod type_expr;
+
+use switch_rand_range::check_switch_rand_range;
+use type_expr::TypeExpr;
 
 // ----------------------------------------------------------------------------
 // Helper structures
@@ -2050,7 +2051,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                                 } else if atom.is_subtype_of(&ty) {
                                     // Iffy conceptually, but the only detections on /tg/ are false positives in the
                                     // component system, where we loop over `var/datum/parent` that is known to be an
-                                    // atom in a way that's hard for Dreamchecker to capture.
+                                    // atom in a way that's hard for DreamChecker to capture.
                                     error(
                                         location,
                                         "iterating over a /datum which might not be an /atom",
@@ -2288,7 +2289,7 @@ impl<'o, 's> AnalyzeProc<'o, 's> {
                                 } else if atom.is_subtype_of(&ty) {
                                     // Iffy conceptually, but the only detections on /tg/ are false positives in the
                                     // component system, where we loop over `var/datum/parent` that is known to be an
-                                    // atom in a way that's hard for Dreamchecker to capture.
+                                    // atom in a way that's hard for DreamChecker to capture.
                                     error(
                                         location,
                                         "iterating over a /datum which might not be an /atom",
